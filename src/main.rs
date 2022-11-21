@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::Path, process::Command};
+use tokio::time;
+
+// Use Jemalloc only for musl-64 bits platforms
+#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
+#[global_allocator]
+static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Repo {
@@ -10,10 +16,21 @@ struct Repo {
 #[tokio::main]
 async fn main() {
     let token = get_env("GITHUB_TOKEN");
-    let repos = get_repos(&token).await.unwrap();
     fs::create_dir("./backup").unwrap_or_default();
-    for rep in &repos {
-        sync_repo(rep, &token);
+    timer_to_back(&token).await;
+}
+
+async fn timer_to_back(token: &str) {
+    let mut interval = time::interval(time::Duration::from_secs(24 * 60 * 60));
+    loop {
+        interval.tick().await;
+        println!("Start backup");
+        let repos = get_repos(&token).await.unwrap();
+        for rep in &repos {
+            println!("Start backup {}", rep.name);
+            sync_repo(rep, &token);
+        }
+        println!("End backup");
     }
 }
 
@@ -25,9 +42,12 @@ fn get_env(key: &str) -> String {
 }
 
 async fn get_repos(token: &str) -> Option<Vec<Repo>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
     let text_response = client
-        .get("https://api.github.com/user/repos")
+        .get("https://api.github.com/user/repos?per_page=1000")
         .header("Authorization", format!("token {}", token))
         .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36")
         .send()
@@ -46,13 +66,10 @@ fn sync_repo(repo: &Repo, token: &str) {
     let path_url = format!("./backup/{}", repo.name);
     if Path::new(&path_url).exists() {
         println!("仓库已存在, 准备更新");
-        cd(&repo.name);
         pull_repo(repo);
-        cd("..");
     } else {
         println!("仓库不存在, 准备下载");
         clone_repo(repo, token);
-        cd("..");
     }
 }
 
@@ -80,8 +97,4 @@ fn pull_repo(repo: &Repo) {
         .expect("执行异常，提示");
     let output_str = String::from_utf8_lossy(&output.stdout);
     print!("{}", output_str)
-}
-
-fn cd(code: &str) {
-    Command::new("cd").arg(code).output().unwrap();
 }
